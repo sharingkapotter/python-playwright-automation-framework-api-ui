@@ -1,0 +1,30 @@
+# Node (React showcase app)
+node_modules/
+dist/
+
+# Python (test framework)
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Playwright artifacts
+test-results/
+playwright-report/
+videos/
+screenshots/
+allure-results/
+
+# Environment & secrets
+.env
+.env.*
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+*.log
+
+# Local archives
+*.zip

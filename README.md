@@ -26,29 +26,34 @@ A production-grade test automation framework built with **Python, pytest and Pla
 
 ## Repository structure
 
-├── .github/workflows/ci.yml # smoke + regression pipelines
-├── components/ # reusable widget objects (pagination)
-├── config/ # typed environment definitions
-├── data/ # test data builders
-├── docs/ # build journal and test strategy
-├── pages/ # page objects
+```text
+.
+├── .github/
+│   └── workflows/
+│       └── ci.yml              # smoke + regression pipelines
+├── components/                 # reusable widget objects (pagination)
+├── config/                     # typed environment definitions
+├── data/                       # test data builders
+├── docs/                       # build journal and test strategy
+├── pages/                      # page objects
 ├── tests/
-│ ├── ui/ # UI suites (23 tests)
-│ └── api/ # API suites (planned)
-├── tools/metrics.py # suite health reporting
-├── ui-testing-showcase/ # target application (React + Vite)
-├── conftest.py # fixtures and CLI options
-├── pytest.ini # configuration and markers
-└── requirements.txt # pinned dependencies
-
+│   ├── ui/                     # UI suites (23 tests)
+│   └── api/                    # API suites (planned)
+├── tools/
+│   └── metrics.py              # suite health reporting
+├── ui-testing-showcase/        # target application (React + Vite)
+├── conftest.py                 # fixtures and CLI options
+├── pytest.ini                  # configuration and markers
+└── requirements.txt            # pinned dependencies
+```
 
 ---
 
 ## Quick start
 
-```bash
+```powershell
 python -m venv .venv
-.venv\Scripts\Activate.ps1        # Windows PowerShell
+.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 playwright install chromium
 pytest
@@ -56,7 +61,7 @@ pytest
 
 ## Running tests
 
-```bash
+```powershell
 pytest                            # full suite against production
 pytest -m smoke                   # critical path only (< 2 min)
 pytest -m regression              # full functional coverage
@@ -69,8 +74,8 @@ python tools/metrics.py           # suite health summary and trend
 
 Failures automatically produce a Playwright trace and screenshot under `test-results/`. Inspect with:
 
-```bash
-playwright show-trace test-results/<test-name>/trace.zip
+```powershell
+playwright show-trace test-results\<test-name>\trace.zip
 ```
 
 ---
@@ -96,7 +101,7 @@ BrightPath HR Portal (`ui-testing-showcase/`) is a React + Vite business applica
 
 Every interactive element carries a stable `data-testid`, and the dataset is deterministic, so exact-value assertions are safe.
 
-```bash
+```powershell
 cd ui-testing-showcase
 npm install
 npm run dev                       # http://localhost:5173

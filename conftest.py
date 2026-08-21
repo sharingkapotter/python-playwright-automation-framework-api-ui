@@ -1,6 +1,9 @@
 import pytest
 from pages.application_form_page import ApplicationFormPage
 
+from clients.reqres_client import ReqresClient
+from config.settings import ENVIRONMENTS, api_key
+
 from config.settings import ENVIRONMENTS
 from pages.dashboard_page import DashboardPage
 
@@ -40,3 +43,20 @@ def dashboard(page):
 @pytest.fixture
 def application_form(page):
     return ApplicationFormPage(page).open()
+
+@pytest.fixture(scope="session")
+def api_context(playwright, environment):
+    context = playwright.request.new_context(
+        base_url=environment.api_base_url,
+        extra_http_headers={
+            "x-api-key": api_key(),
+            "Content-Type": "application/json",
+        },
+    )
+    yield context
+    context.dispose()
+
+
+@pytest.fixture
+def reqres(api_context):
+    return ReqresClient(api_context)

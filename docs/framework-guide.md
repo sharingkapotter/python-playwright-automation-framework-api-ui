@@ -2,7 +2,7 @@
 
 **Project:** `python-playwright-automation-framework-api-ui`
 **Application under test:** BrightPath HR Portal — https://python-playwright-automation-framew-eight.vercel.app
-**Stack:** Python · pytest · Playwright · GitHub Actions (planned)
+**Stack:** Python · pytest · Playwright · GitHub Actions
 
 This is a living document. Each phase adds a section covering *what* was built, *why* it was built that way, and the talking points that come out of it.
 
@@ -316,6 +316,200 @@ This is the structural advantage of pytest fixtures over `setUp`: `setUp` is one
 
 ---
 
+---
+
+## Phase 4 — Suites, markers and data-driven testing (complete)
+
+### Test data as objects
+
+```python
+@dataclass(frozen=True)
+class Applicant:
+    first_name: str = "Sunil"
+    email: str = "sunil.tester@example.com"
+    ...
+
+def an_applicant(**overrides) -> Applicant:
+    return replace(Applicant(), **overrides)
+```
+
+Everything is valid by default; a scenario states only what it changes:
+
+```python
+an_applicant(email="not-an-email")
+```
+
+**Why this matters at scale.** The override *is* the test's intent — the other eleven fields are noise that would otherwise be repeated in every test. When the form gains a required field, it is added in one place rather than amended in forty tests. This is the Object Mother pattern, and it is one of the strongest structural defences against duplication.
+
+### Parametrisation
+
+Eight required-field validations share a single test body. They report individually — so a failure names the exact rule that broke — but there is one function to maintain.
+
+**The principle:** coverage grows with *data*; maintenance grows with *code*. Parametrisation decouples the two, which is precisely what "coverage without bloat" means in practice.
+
+### Markers as an execution strategy
+
+| Marker | Purpose | Runs |
+|---|---|---|
+| `smoke` | Critical path | Every push and PR |
+| `regression` | Full functional coverage | Nightly, pre-release |
+| `negative` | Invalid input and failure paths | With regression |
+| `api` | Backend-service tests | Every push (cheap job) |
+| `flaky` | Quarantined | Excluded from gates |
+
+`--strict-markers` makes an unregistered or misspelled marker fail the run. A typo such as `@pytest.mark.smoek` would otherwise silently remove a test from the commit gate forever — **silent under-execution is invisible in a green build** and is treated as its own defect class.
+
+### Negative tests must assert the absence of success
+
+```python
+expect(form.error_for("email")).to_contain_text("valid email address")
+expect(form.success_message).not_to_be_visible()      # <- the line most people omit
+```
+
+Without the second assertion the test still passes if the application shows both an error *and* a success message. Asserting only the expected failure is what makes a negative test decorative rather than real.
+
+### One convention, one method
+
+The application names validation messages predictably (`error-firstName`, `error-email`), so the page object needs a single method:
+
+```python
+def error_for(self, field: str):
+    return self.page.get_by_test_id(f"error-{field}")
+```
+
+A naming convention agreed with developers collapses a dozen locators into one method. Testability is designed in, not coped with.
+
+---
+
+## Phase 5 — Diagnostics, reporting and parallelism (complete)
+
+### Configuration
+
+```ini
+addopts =
+    --strict-markers
+    --tracing=retain-on-failure
+    --screenshot=only-on-failure
+    --junitxml=reports/junit.xml
+    --durations=10
+    --html=reports/report.html
+    --self-contained-html
+```
+
+HTML is for humans; **JUnit XML is for machines** — every CI system and reporting tool consumes it. `--durations=10` puts the slowest tests in front of the engineer after every run rather than in a report nobody opens.
+
+### The measured cost of observability
+
+| Configuration | Duration (23 tests) |
+|---|---|
+| No artefacts | 20.1 s |
+| Tracing + screenshots | 24.6 s |
+| Tracing + screenshots + video | 28.8 s |
+
+Video costs roughly 17% for marginal value over a trace, which already contains DOM snapshots, network activity and console output. **Decision: video is disabled by default and enabled in CI only for hard-to-reproduce failures.** Quantifying what observability costs — rather than enabling everything available — is the difference between configuring a tool and designing a system.
+
+### Parallelism
+
+`-n auto` is deliberately *not* in `addopts`: parallel runs interleave output and complicate debugging, so serial is the correct local default and parallel is a CI flag.
+
+**The prerequisite is architectural.** Parallelism works only because every test is independent — fresh browser context, no shared state — a property designed in from Phase 1. Suites with shared state cannot be parallelised without a rewrite, which is why isolation is an architectural decision rather than a style preference.
+
+### Retry policy
+
+`pytest-rerunfailures` is installed; **nothing is retried by default**. A blanket `--reruns` turns instability into an invisible cost: the build goes green, nobody investigates, confidence erodes.
+
+The policy — classify, quarantine, time-box to one sprint, diagnose from traces, report the rate — is documented in `test-strategy.md`. The essential reframing: retries are a *diagnostic signal*, never a remedy.
+
+---
+
+## Phase 6 — CI/CD (complete)
+
+Two jobs answering **different questions**, not one suite run twice.
+
+| | Smoke | Regression |
+|---|---|---|
+| Trigger | Every push and PR | Nightly + manual |
+| Target | Deployed Vercel environment | Hermetic: built from source, served locally |
+| Catches | Deployment and infrastructure faults | Functional regressions |
+| Budget | < 2 min (measured: 47 s) | < 20 min |
+
+**Why two targets.** Smoke verifies the *real artefact in its real environment* — deployment problems a local test can never see. Regression is hermetic, so a red result means the code is broken, not that a third-party host was slow. Running the same tests against different targets for different reasons is automation strategy rather than test writing.
+
+**The configuration layer paid off here.** `--env prod` and `--env preview` were already defined in Phase 3, and `preview` already pointed at `localhost:4173` — exactly where the CI job serves the built application. No CI-specific configuration, no duplicated URLs. A good abstraction proves itself when a requirement arrives that it was not written for.
+
+### Pipeline details that matter
+
+- `if:` on the regression job — a 20-minute run does not fire on every push. Cost control is part of pipeline design.
+- `concurrency` with `cancel-in-progress` — superseded runs are killed rather than queued.
+- `if: always()` on artefact upload — steps are skipped after a failure by default, which would discard the report and trace from precisely the run that needs them.
+- `timeout-minutes` — a hung browser cannot burn hours of runner time.
+- Fail-fast ordering — the application is built *before* test dependencies are installed, so a broken build reports in 30 seconds rather than after a browser download.
+- Secrets are injected via GitHub Actions secrets; `.env` is git-ignored and `.env.example` documents the required variables.
+
+---
+
+## Phase 7 — Metrics and governance (complete)
+
+`tools/metrics.py` parses `reports/junit.xml`, prints a summary, and appends a row to `reports/metrics-history.csv`.
+
+```
+Suite health
+  Tests executed     23
+  Pass rate          100.0%
+  Execution time     28.4s
+
+  Slowest tests
+      3.02s  test_valid_application_is_submitted_successfully
+      2.94s  test_server_error_is_surfaced_to_the_user
+```
+
+**Trend, not snapshot.** A single run says almost nothing. "Regression time grew 40% over six weeks while test count grew 15%" says duplication is creeping in and identifies where to look. Only a trend supports a decision.
+
+**The tool criticises its own suite.** Any test exceeding a five-second budget is flagged as a redundancy candidate. A metrics tool that reports only good news is decoration.
+
+`docs/test-strategy.md` records the full policy: layer assignment, what is deliberately not automated, metric definitions with the decision each drives, the flaky-test procedure, and retirement criteria.
+
+---
+
+## Phase 8 — API layer (complete)
+
+### Client objects — page objects for HTTP
+
+```python
+class ReqresClient:
+    def list_users(self, page: int = 1):
+        return self.request.get(f"/api/users?page={page}")
+```
+
+Endpoint paths and payload shapes are defined once; tests never construct URLs. When a path moves to `/api/v2/`, one line changes. The client returns raw responses and asserts nothing — the same separation as page objects: **the client describes capability, the test owns expectation.**
+
+### Playwright's `APIRequestContext` over `requests`
+
+`requests` is the more common Python choice and would be defensible. `APIRequestContext` was chosen because it shares cookies and authentication state with the browser, which enables the pattern that matters at scale: **set up state via API, verify via UI.** Rather than a 40-second end-to-end journey clicking through six screens to reach a state, the state is created in one HTTP call and a single page is opened to verify it.
+
+*Trade-off accepted:* less familiar to Python engineers than `requests`, and tied to the Playwright ecosystem.
+
+### Secret handling
+
+`.env` holds real values and is git-ignored; `.env.example` documents which variables exist. In CI the value is injected through GitHub Actions secrets. Secrets committed to a repository are permanent — git history retains them after deletion — so this is one of the few practices that must be correct on the first attempt.
+
+### The layering evidence — measured
+
+| Layer | Tests | Duration | Per test |
+|---|---|---|---|
+| API | 10 | 2.25 s | ~0.19 s |
+| UI | 23 | ~28 s | ~1.2 s |
+
+**A UI test costs roughly six times what an API test costs**, and that ratio widens with application complexity.
+
+Applied to this suite: eight required-field validations are currently verified through a browser at roughly 12 seconds. Were those rules server-enforced, the exhaustive matrix — every field, every boundary, every malformed input — would run at the API layer in about two seconds, while the UI retained *one* representative case proving the message renders on the correct field.
+
+**The rule this establishes:** the UI tests that the error *appears*; the API tests that the rule is *enforced*. Moving rule coverage down a layer is how coverage grows without execution time growing with it.
+
+The API job in CI also requires no browser binary, so it runs in well under a minute — the testing pyramid expressed in CI minutes as well as in test counts.
+
+---
+
 ## Architecture decisions (continued)
 
 | # | Decision | Rationale | Trade-off accepted |
@@ -327,6 +521,14 @@ This is the structural advantage of pytest fixtures over `setUp`: `setUp` is one
 | 12 | `conftest.py` as composition root | Automatic discovery; single wiring point | Implicit — newcomers must learn that fixtures arrive by name |
 | 13 | Layered `base_url` precedence (flag > env > default) | One suite serves laptop, PR preview, and production | Two ways to set the same value; documentation required |
 | 14 | Page-object setup fixtures (`dashboard`, `application_form`) | Removes repeated navigation from every test | Tests needing pre-load state must bypass the fixture |
+| 15 | Data builders (`an_applicant`) over inline setup | New required fields change one file, not forty tests | Defaults are implicit; a reader must open the builder |
+| 16 | Parametrisation over duplicated test functions | Coverage grows by data, maintenance by code | Parametrised failures need the case id read to interpret |
+| 17 | `--strict-markers` enforced | A misspelled marker fails loudly instead of silently skipping | Every new marker must be registered before use |
+| 18 | Video disabled by default; tracing always on | 17% execution cost removed for marginal diagnostic gain | Some rare visual failures are harder to reconstruct |
+| 19 | No global retries; quarantine with a one-sprint time-box | Flakiness stays visible and gets fixed | Occasional genuine infrastructure blips fail the build |
+| 20 | Two CI jobs: deployed smoke, hermetic regression | Each answers a different question about quality | Two pipelines to maintain; app build duplicated in CI |
+| 21 | `APIRequestContext` over `requests` | Shares auth/state with the browser; enables API setup for UI tests | Less familiar to Python engineers; ties API layer to Playwright |
+| 22 | `.env` for secrets, `.env.example` committed | Credentials never enter git history | Contributors must configure their environment before running |
 
 ---
 
@@ -388,8 +590,8 @@ pytest --base-url http://localhost:5173   # override the target environment
 | 0–1 | Environment, dependencies, first passing test | ✅ Complete |
 | 2 | Page Object Model — reusable components, separation of concerns | ✅ Complete |
 | 3 | Configuration layer, custom fixtures, multi-environment support | ✅ Complete |
-| 4 | Full suites: happy paths, negative cases, markers, data-driven tests | In progress |
-| 5 | Tracing, HTML reporting, parallel execution, retry policy | |
-| 6 | CI/CD — GitHub Actions, artefacts, pipeline gating | |
-| 7 | Metrics, flake tracking, test-inventory governance, anti-bloat policy | |
-| 8 | API test layer and the UI/API testing-pyramid split | |
+| 4 | Full suites: happy paths, negative cases, markers, data-driven tests | ✅ Complete |
+| 5 | Tracing, HTML reporting, parallel execution, retry policy | ✅ Complete |
+| 6 | CI/CD — GitHub Actions, artefacts, pipeline gating | ✅ Complete |
+| 7 | Metrics, flake tracking, test-inventory governance, anti-bloat policy | ✅ Complete |
+| 8 | API test layer and the UI/API testing-pyramid split | ✅ Complete |

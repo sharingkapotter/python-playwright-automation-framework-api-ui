@@ -30,3 +30,4 @@ allure-results/
 *.zip
 reports/
 test-results/
+.env

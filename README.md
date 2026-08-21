@@ -22,7 +22,7 @@ A portfolio automation framework demonstrating professional SDET skills: UI test
 - Component playground: modals, tabs, accordions, tooltips, alerts, and dynamic elements with deliberate loading delays
 - Every element exposes a stable `data-testid`; deterministic data makes exact assertions safe
 
-Live demo: https://python-playwright-automation-framew.vercel.app/
+Live demo: https://python-playwright-automation-framew-eight.vercel.app
 
 ## Roadmap
 

@@ -1,0 +1,2 @@
+# Language stats should reflect the test framework, not the application under test
+ui-testing-showcase/** linguist-vendored

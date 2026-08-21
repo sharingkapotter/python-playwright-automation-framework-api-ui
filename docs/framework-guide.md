@@ -166,6 +166,178 @@ page.pause()                    # opens Playwright Inspector — step through, t
 
 ---
 
+---
+
+## Phase 2 — Page Object Model (complete)
+
+### The problem being solved
+
+With locators written inline in tests, a single renamed `data-testid` requires editing every test that touches that element. At 80 tests against one screen, that is 80 edits. Locator churn of this kind is the largest hidden maintenance cost in a mature suite and the most common reason teams abandon automation.
+
+**The rule:** a locator is defined exactly once, in the object that owns it.
+
+### Structure added
+
+```
+pages/
+├── __init__.py
+├── base_page.py          ← shared behaviour for all pages
+└── dashboard_page.py     ← one screen
+components/
+├── __init__.py
+└── pagination.py         ← one reusable widget
+```
+
+### Design rules adopted
+
+**Locators are attributes; behaviours are methods.** `search_for("Alice")` expresses user intent. A test never says "type into this input" — translating intent into interaction is the page object's job.
+
+**The page owns its own definition of "loaded".** `DashboardPage.open()` waits for the table before returning, because the dashboard shows a spinner for ~1.2 seconds. Without this, every test would repeat the wait, and eventually one would omit it and become flaky.
+
+**Methods return `self`.** Enables chaining (`page.open().search_for("Alice")`) and keeps tests reading as sentences.
+
+**No assertions inside page objects.** Page objects describe *capability*; tests own *expectation*. Mixing the two produces page objects that can only be used by the one test whose assertions they contain.
+
+### Component objects — composition over inheritance
+
+Pagination is not a page. It is a widget appearing on many pages. Implemented as a method on `DashboardPage`, the second paginated screen would copy it; implemented as a component object that pages *contain*, the second screen costs nothing.
+
+```python
+class DashboardPage(BasePage):
+    def __init__(self, page):
+        ...
+        self.pagination = Pagination(page)   # composed, not inherited
+```
+
+Child locators are scoped inside the component's root (`self.root.get_by_test_id(...)`), so two paginators on one screen never collide.
+
+**Why not inheritance:** deep hierarchies in test frameworks converge on a `BasePage` with dozens of unrelated methods that nobody can safely change. Composition keeps each unit small, independently testable, and independently replaceable.
+
+### Assertion boundary — a framework standard
+
+| Use | When | Why |
+|---|---|---|
+| `expect(locator)` | Any UI-produced state | Auto-retries until true or timeout |
+| plain `assert` | A value already extracted for logic | Evaluates once — no retry |
+
+`assert page.get_by_test_id("x").inner_text() == "5"` is a classic flake source: it fails whenever the app is 50 ms slower. **Assert on locators, not on extracted strings, unless the value itself is needed.**
+
+### Incident: the pagination failure
+
+A test failed with `Actual value: Page 1 of 4` after 14 retries. Diagnosis sequence:
+
+1. **Read the failure literally.** The locator resolved 14 times — so the assertion was not mistargeted. The click produced no state change.
+2. **Establish deterministic vs intermittent.** It failed on every run — a defect, not a race. This distinction determines the entire investigation path and should always be step one.
+3. **Root cause:** `self.next_button` had been assigned `get_by_test_id("pagination-info")` — the click was landing on a `<span>`, which does nothing.
+
+**Lessons carried forward:**
+
+- Actionability checks verify the element *named*, not that the *right* element was named. `to_be_enabled()` passed trivially because a `<span>` is never disabled. Role-based locators (`get_by_role("button", name="Next page")`) would have failed loudly instead — worth considering as the standard for interactive elements while `data-testid` remains the standard for content assertions.
+- The defect was in the test, not the application. **False failures are more corrosive than missing coverage:** once a team learns that red does not mean broken, real regressions pass unnoticed. Test code is production code.
+- Environmental explanations ("the network is slow", "CI is flaky") should be the *last* hypothesis, not the first.
+
+---
+
+## Phase 3 — Configuration layer and fixtures (complete)
+
+### The problems being solved
+
+1. The target environment was hardcoded in `pytest.ini` — running against local and production required editing a file.
+2. Every test repeated `DashboardPage(page).open()` — setup knowledge duplicated rather than injected.
+
+### Structure added
+
+```
+config/
+├── __init__.py
+└── settings.py           ← typed environment definitions
+conftest.py               ← composition root: options, fixtures, wiring
+```
+
+### Environments as typed objects
+
+```python
+@dataclass(frozen=True)
+class Environment:
+    name: str
+    base_url: str
+
+ENVIRONMENTS = {"local": ..., "preview": ..., "prod": ...}
+```
+
+**Why a dataclass rather than a dict of strings.** An environment currently holds one URL. It will soon hold an API base URL, a timeout profile, credentials, and feature flags. A typed object grows cleanly and supports autocomplete and refactoring; a bare dict degrades into stringly-typed keys that cannot be changed safely. `frozen=True` prevents a test from mutating shared configuration mid-run.
+
+### `conftest.py` as the composition root
+
+pytest discovers `conftest.py` automatically and shares its contents with every test beneath it — no imports required. It is the single place where the framework's pieces are wired together.
+
+```python
+def pytest_addoption(parser):
+    parser.addoption("--env", default="prod", help="local | preview | prod")
+
+@pytest.fixture(scope="session")
+def environment(request):
+    name = request.config.getoption("--env")
+    if name not in ENVIRONMENTS:
+        raise pytest.UsageError(f"Unknown --env '{name}'. Choose from {list(ENVIRONMENTS)}")
+    return ENVIRONMENTS[name]
+
+@pytest.fixture(scope="session")
+def base_url(request, environment):
+    return request.config.getoption("--base-url") or environment.base_url
+```
+
+**Fail fast on invalid input.** `--env stagng` raises immediately (measured: 0.04 s) rather than launching browsers and producing dozens of confusing connection errors. Cheap validation before expensive work.
+
+**Layered precedence:** explicit `--base-url` > named `--env` > default. This is what allows one suite to serve a developer laptop, an ephemeral PR preview URL, and a scheduled production run without modification.
+
+**Fixture overriding.** `base_url` and `browser_context_args` already exist in the installed plugins. Redefining them *while requesting the original as an argument* extends the plugin rather than replacing it — customisation without forking.
+
+### Fixtures are dependency injection
+
+```python
+@pytest.fixture
+def dashboard(page):
+    return DashboardPage(page).open()
+
+def test_search_filters_the_table(dashboard):   # precondition requested by name
+    ...
+```
+
+This is the structural advantage of pytest fixtures over `setUp`: `setUp` is one shared block every test in a class must accept, whereas fixtures are composable and requested individually.
+
+**The trade-off, stated explicitly.** The `dashboard` fixture waits past the loading spinner, so a test that needs to *observe* the spinner cannot use it and must take raw `page`. Setup fixtures should encode the *common* precondition, not every precondition — an abstraction that forces all cases through one path makes tests contort themselves to opt out. Knowing where an abstraction should stop is as important as creating it.
+
+### Incident: packages created in the wrong directory
+
+`pages/`, `components/` and `config/` were initially created inside `tests/ui/`. Phase 2 worked anyway, because pytest inserts the *test file's own directory* into `sys.path` — so `from pages...` resolved by accident. Phase 3 broke, because `conftest.py` sits at the repository root and can only import root-level packages.
+
+**Lesson:** an import succeeding is not evidence that a file is correctly located. Python's dynamic path resolution can make misplaced code appear correct until an unrelated change exposes it. `pythonpath = .` in `pytest.ini` makes the import root explicit and deterministic rather than dependent on collection order.
+
+---
+
+## Architecture decisions (continued)
+
+| # | Decision | Rationale | Trade-off accepted |
+|---|---|---|---|
+| 8 | Page Object Model | One definition per locator; tests express intent | Indirection — a reader must open two files to see the full picture |
+| 9 | Component objects for reusable widgets | Reuse across pages; composition over inheritance | More small classes to navigate |
+| 10 | No assertions inside page objects | Page objects stay reusable across differing expectations | Slightly more verbose tests |
+| 11 | Typed `Environment` objects over string config | Grows to hold credentials, timeouts, feature flags | More ceremony than a dict for the trivial case |
+| 12 | `conftest.py` as composition root | Automatic discovery; single wiring point | Implicit — newcomers must learn that fixtures arrive by name |
+| 13 | Layered `base_url` precedence (flag > env > default) | One suite serves laptop, PR preview, and production | Two ways to set the same value; documentation required |
+| 14 | Page-object setup fixtures (`dashboard`, `application_form`) | Removes repeated navigation from every test | Tests needing pre-load state must bypass the fixture |
+
+---
+
+## Talking points (continued)
+
+**On maintenance cost as the real metric.** Test count is an output; the framework governs the *cost of each additional test*. POM plus component objects mean one concept lives in one place, so maintenance grows sub-linearly with coverage. That is the structural answer to automation bloat — considerably stronger than "we review tests periodically".
+
+**On flaky-test triage.** The first question is always *deterministic or intermittent*, because the two demand different investigations. Evidence comes from traces (`--tracing retain-on-failure`, then `playwright show-trace`), which capture DOM snapshots before and after every action. Retries are a diagnostic signal, never a remedy: a test that only passes on retry is an open defect in the test or the application.
+
+**On trust in the suite.** A red suite that does not mean "broken" is worse than no suite. False failures train a team to ignore results, and the first ignored real regression is the cost. This is why test code is held to production standards — review, refactoring, and ownership included.
+
 ## Architecture decisions recorded so far
 
 | # | Decision | Rationale | Trade-off accepted |
@@ -214,9 +386,9 @@ pytest --base-url http://localhost:5173   # override the target environment
 | Phase | Focus | Status |
 |---|---|---|
 | 0–1 | Environment, dependencies, first passing test | ✅ Complete |
-| 2 | Page Object Model — reusable components, separation of concerns | Next |
-| 3 | Configuration layer, custom fixtures, multi-environment support | |
-| 4 | Full suites: happy paths, negative cases, markers, data-driven tests | |
+| 2 | Page Object Model — reusable components, separation of concerns | ✅ Complete |
+| 3 | Configuration layer, custom fixtures, multi-environment support | ✅ Complete |
+| 4 | Full suites: happy paths, negative cases, markers, data-driven tests | In progress |
 | 5 | Tracing, HTML reporting, parallel execution, retry policy | |
 | 6 | CI/CD — GitHub Actions, artefacts, pipeline gating | |
 | 7 | Metrics, flake tracking, test-inventory governance, anti-bloat policy | |

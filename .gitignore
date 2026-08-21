@@ -28,3 +28,5 @@ allure-results/
 
 # Local archives
 *.zip
+reports/
+test-results/
